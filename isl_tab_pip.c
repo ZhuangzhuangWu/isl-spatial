@@ -5016,17 +5016,40 @@ static int force_better_solution(struct isl_tab *tab,
 		return 0;
 	}
 
+	fprintf(stderr, "[isl_tab] forcing better solution on %d\n", i);
+
 	ctx = isl_vec_get_ctx(sol);
 	v = isl_vec_alloc(ctx, 1 + tab->n_var);
 	if (!v)
 		return -1;
 
+// [# original, set all dims until i inclusive to zero]
+#if 0
 	for (; i >= 0; --i) {
 		v = isl_vec_clr(v);
 		isl_int_set_si(v->el[1 + i], -1);
 		if (add_lexmin_eq(tab, v->el) < 0)
 			goto error;
 	}
+#endif
+//  set all dims until i to zero, set i-th dim inferior to its current value
+	v = isl_vec_clr(v);
+	isl_int_set_si(v->el[1 + i], -1);
+	isl_int_sub_ui(v->el[0], sol->el[1 + i], 1);
+	if (add_lexmin_ineq(tab, v->el) < 0)
+	{
+		fprintf(stderr,"[isl_tab] could not add inequality\n");
+		goto error;
+	}
+
+	--i;
+	for (; i >= 0; --i) {
+		v = isl_vec_clr(v);
+		isl_int_set_si(v->el[1 + i], -1);
+		if (add_lexmin_eq(tab, v->el) < 0)
+			goto error;
+	}
+
 
 	isl_vec_free(v);
 	return 0;
