@@ -11,6 +11,8 @@ typedef struct isl_dim_map isl_dim_map;
 __isl_give isl_dim_map *isl_dim_map_alloc(isl_ctx *ctx, unsigned len);
 __isl_give isl_dim_map *isl_dim_map_copy(isl_ctx *ctx,
 	__isl_keep isl_dim_map *dim_map);
+__isl_null isl_dim_map *isl_dim_map_free(isl_ctx *ctx,
+	__isl_take isl_dim_map *dim_map);
 void isl_dim_map_range(__isl_keep isl_dim_map *dim_map,
 	unsigned dst_pos, unsigned dst_stride,
 	unsigned src_pos, unsigned src_stride,
