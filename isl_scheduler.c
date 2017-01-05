@@ -415,7 +415,8 @@ isl_schedule_constraints_get_counted_accesses(
  */
 static int may_be_tagged(enum isl_edge_type type)
 {
-	if (type == isl_edge_condition || type == isl_edge_conditional_validity)
+	if (type == isl_edge_condition || type == isl_edge_conditional_validity ||
+		type == isl_edge_spatial_proximity)
 		return 1;
 	return 0;
 }
