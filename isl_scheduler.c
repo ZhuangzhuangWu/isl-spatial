@@ -3122,7 +3122,6 @@ static isl_stat add_intra_spatial_proximity_constraints(
 	isl_map *map = edge->map;
 	isl_ctx *ctx = isl_map_get_ctx(map);
 	struct isl_sched_node *node = edge->src;
-	isl_union_map *spatial_proximity = edge->array_tagged_map;
 
 	// fprintf(stderr, "[isl] processing edge %p %d %d\n", edge,
 	//   isl_union_map_n_map(spatial_proximity), s);
@@ -3139,6 +3138,7 @@ static isl_stat add_intra_spatial_proximity_constraints(
 	dim_map = intra_dim_map(ctx, graph, node, offset, -s);
 
 	if (!local) {
+		isl_union_map *spatial_proximity = edge->array_tagged_map;
 		struct add_intra_spatial_proximity_data data = {
 			graph, edge, 1, coef, dim_map
 		};
@@ -3331,6 +3331,15 @@ static int add_all_proximity_constraints(struct isl_sched_graph *graph,
 			(is_coincidence(edge) && use_coincidence);
 		if (!is_proximity(edge) && !local)
 			continue;
+
+		if (!local) {
+			fprintf(stderr, "[isl] ignoring proximity: ");
+			isl_map_dump(edge->map);
+			continue;
+		} else {
+			fprintf(stderr, "[isl] processing conicidence: ");
+			isl_map_dump(edge->map);
+		}
 
 		//isl_map_debug(edge->map);
 
@@ -3651,7 +3660,7 @@ static isl_stat add_spatial_proximity_constraints_edge(
 #endif
 
 static isl_stat add_spatial_proximity_constraints(isl_ctx *ctx,
-	struct isl_sched_graph *graph)
+	struct isl_sched_graph *graph, int use_coincidence)
 {
 	int i;
 	//isl_stat r;
@@ -3659,22 +3668,25 @@ static isl_stat add_spatial_proximity_constraints(isl_ctx *ctx,
 	// For each edge,
 	for (i = 0; i < graph->n_edge; ++i)
 	{
+		int local;
 		struct isl_sched_edge *edge = &graph->edge[i];
 
-		if (!is_spatial_proximity(edge))
+		local = is_local(edge) ||
+			(use_coincidence && is_coincidence(edge));
+
+		if (!is_spatial_proximity(edge) && !local)
 			continue;
 
 		if (edge->src == edge->dst) {
 			add_intra_spatial_proximity_constraints(
-				graph, edge, 1, is_local(edge));
+				graph, edge, 1, local);
 			add_intra_spatial_proximity_constraints(
-				graph, edge, -1, is_local(edge));
-		}
-		else {
+				graph, edge, -1, local);
+		} else {
 			add_inter_spatial_proximity_constraints(
-				graph, edge, 1, is_local(edge));
+				graph, edge, 1, local);
 			add_inter_spatial_proximity_constraints(
-				graph, edge, -1, is_local(edge));
+				graph, edge, -1, local);
 		}
 #if 0
 		struct add_spatial_proximity_edge_data data = { ctx, graph, edge };
@@ -4719,7 +4731,7 @@ static isl_stat setup_lp(isl_ctx *ctx, struct isl_sched_graph *graph,
 	if (add_all_proximity_constraints(graph, use_coincidence) < 0)
 		return isl_stat_error;
 #endif
-	if (add_spatial_proximity_constraints(ctx, graph) < 0)
+	if (add_spatial_proximity_constraints(ctx, graph, use_coincidence) < 0)
 		return isl_stat_error;
 	if (add_all_validity_constraints(graph, use_coincidence) < 0)
 		return isl_stat_error;
