@@ -2363,8 +2363,6 @@ static isl_stat graph_init(struct isl_sched_graph *graph,
 	init_ref_to_array(graph);
 	graph->array_to_ref_borrowed = 0;
 
-	array_to_ref_dump(ctx, graph->array_to_ref);
-
 	return isl_stat_ok;
 }
 
@@ -4506,7 +4504,6 @@ static __isl_give isl_vec *solve_lp(struct isl_sched_graph *graph)
 			graph->region[i].len = 0;
 	}
 	lp = isl_basic_set_copy(graph->lp);
-	//isl_basic_set_debug(lp);
 	sol = isl_tab_basic_set_non_trivial_lexmin(lp, n_op/*#2*/, graph->n,
 				       graph->region, &check_conflict, graph);
 	return sol;
@@ -6582,7 +6579,6 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 		if (setup_lp(ctx, graph, use_coincidence) < 0)
 			return isl_stat_error;
 		sol = solve_lp(graph);
-		isl_vec_dump(sol);
 		if (!sol)
 			return isl_stat_error;
 		if (sol->size == 0) {
