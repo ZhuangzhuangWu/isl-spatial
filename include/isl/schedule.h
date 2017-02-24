@@ -110,6 +110,10 @@ void isl_schedule_constraints_dump(__isl_keep isl_schedule_constraints *sc);
 __isl_give isl_schedule *isl_schedule_constraints_compute_schedule(
 	__isl_take isl_schedule_constraints *sc);
 
+__isl_give isl_schedule_node *isl_schedule_constraints_recompute_schedule(
+	__isl_take isl_schedule_constraints *sc,
+	__isl_take isl_schedule_node *node);
+
 __isl_give isl_schedule *isl_union_set_compute_schedule(
 	__isl_take isl_union_set *domain,
 	__isl_take isl_union_map *validity,

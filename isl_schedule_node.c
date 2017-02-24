@@ -2229,6 +2229,17 @@ __isl_give isl_schedule_node *isl_schedule_node_sequence_splice_child(
 	return node;
 }
 
+/* Remove all children of the node "node".
+ *
+ * Return the updated node.
+ */
+__isl_give isl_schedule_node *isl_schedule_node_reset_children(
+	__isl_take isl_schedule_node *node)
+{
+	node->tree = isl_schedule_tree_reset_children(node->tree);
+	return node;
+}
+
 /* Update the ancestors of "node" to point to the tree that "node"
  * now points to.
  * That is, replace the child in the original parent that corresponds

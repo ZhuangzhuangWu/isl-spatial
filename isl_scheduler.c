@@ -1166,6 +1166,7 @@ struct isl_sched_graph {
 	struct isl_region *region;
 
 	isl_basic_set *lp;
+	isl_basic_set *lp_restrain;
 
 	int src_scc;
 	int dst_scc;
@@ -1480,6 +1481,7 @@ static int graph_alloc(isl_ctx *ctx, struct isl_sched_graph *graph,
 	graph->intra_hmap = isl_map_to_basic_set_alloc(ctx, 2 * n_edge);
 	graph->inter_hmap = isl_map_to_basic_set_alloc(ctx, 2 * n_edge);
 	graph->counted_accesses = NULL;
+	graph->lp_restrain = NULL;
 
 	graph->ref_to_array = isl_id_to_id_alloc(ctx, 1);
 	graph->array_to_ref = isl_hash_table_alloc(ctx, 1);
@@ -1533,6 +1535,7 @@ static void graph_free(isl_ctx *ctx, struct isl_sched_graph *graph)
 		isl_hash_table_free(ctx, graph->edge_table[i]);
 	isl_hash_table_free(ctx, graph->node_table);
 	isl_basic_set_free(graph->lp);
+	isl_basic_set_free(graph->lp_restrain);
 	isl_union_map_free(graph->counted_accesses);
 	isl_id_to_id_free(graph->ref_to_array);
 	if (!graph->array_to_ref_borrowed)
@@ -4188,6 +4191,98 @@ static isl_stat graph_sort_id_list(struct isl_sched_graph *graph)
 	return isl_stat_ok;
 }
 
+static __isl_give isl_space *compute_lp_space(isl_ctx *ctx,
+	struct isl_sched_graph *graph, int *param_pos, int *n_eq, int *n_ineq,
+	int use_coincidence)
+{
+	int total, i, n_ids;
+	isl_space *space;
+	int nparam = isl_space_dim(graph->node[0].space, isl_dim_param);
+	int spatial_locality = has_any_spatial_proximity(graph);
+	int parametric = ctx->opt->schedule_parametric;
+
+	if (!graph->id_list)
+		return NULL;
+
+	if (spatial_locality) {
+		n_ids = graph->id_list->n;
+	} else {
+		n_ids = 1;
+	}
+	*param_pos = 2 * n_ids + 2;
+	total = *param_pos;
+	total += (2 * nparam + 1) * n_ids;
+
+	if (graph_sort_id_list(graph) < 0)
+		return NULL;
+
+	for (i = 0; i < graph->n; ++i) {
+		struct isl_sched_node *node = &graph->node[graph->sorted[i]];
+		if (node_update_cmap(node) < 0)
+			return NULL;
+		node->start = total;
+		total += 1 + node->nparam + 2 * node->nvar;
+	}
+
+	// TODO: should we add constraints for (spatial) proximity
+	// to n_ineq, n_eq here, or does the _extend function do it for us?
+	// Seems like it can reallocate if necessary, but faster to do it
+	// straight away.  For each spatial proximity map (multiple per edge),
+	// we add 2*size(coef) constraints (don't know if equations or inequalities)
+	// unless the edge is local, when we add size(coef) constraints for now.
+
+	if (count_constraints(graph, n_eq, n_ineq, use_coincidence) < 0)
+		return NULL;
+	if (count_bound_constant_constraints(ctx, graph, n_eq, n_ineq) < 0)
+		return NULL;
+	if (count_bound_coefficient_constraints(ctx, graph, n_eq, n_ineq) < 0)
+		return NULL;
+
+	// constraints for per-array sums
+	*n_eq += 2 * n_ids + parametric;
+
+	return isl_space_set_alloc(ctx, 0, total);
+}
+
+static isl_stat setup_lp_constraints(isl_ctx *ctx,
+	struct isl_sched_graph *graph, int param_pos, int use_coincidence)
+{
+	int parametric, spatial_locality;
+
+	parametric = ctx->opt->schedule_parametric;
+	spatial_locality = has_any_spatial_proximity(graph);
+
+	// if (spatial_locality)
+		if (add_arraywise_sum_constraints(graph, spatial_locality) < 0)
+			return isl_stat_error;
+	// else
+	// 	if (add_sum_constraint(graph, 0, param_pos + 1, 2 * nparam) < 0)
+	// 		return isl_stat_error;
+
+	if (parametric && add_param_sum_constraint(graph, param_pos - 2) < 0)
+		return isl_stat_error;
+	if (add_var_sum_constraint(graph, param_pos - 1) < 0)
+		return isl_stat_error;
+	if (add_bound_constant_constraints(ctx, graph) < 0)
+		return isl_stat_error;
+	if (add_bound_coefficient_constraints(ctx, graph) < 0)
+		return isl_stat_error;
+
+	if (!spatial_locality) {
+		if (add_all_proximity_constraints(graph, use_coincidence) < 0)
+			return isl_stat_error;
+	} else {
+		if (add_spatial_proximity_constraints(ctx, graph, use_coincidence) < 0)
+			return isl_stat_error;
+	}
+	if (add_all_validity_constraints(graph, use_coincidence) < 0)
+		return isl_stat_error;
+
+	graph->lp = isl_basic_set_simplify(graph->lp);
+
+	return isl_stat_ok;
+}
+
 /* Construct an ILP problem for finding schedule coefficients
  * that result in non-negative, but small dependence distances
  * over all dependences.
@@ -4237,94 +4332,21 @@ static isl_stat graph_sort_id_list(struct isl_sched_graph *graph)
 static isl_stat setup_lp(isl_ctx *ctx, struct isl_sched_graph *graph,
 	int use_coincidence)
 {
-	int i;
-	unsigned nparam;
-	unsigned total;
 	isl_space *space;
-	int parametric;
-	int spatial_locality;
-	int param_pos, total_params = 0;
+	int param_pos;
 	int n_eq, n_ineq;
-	int n_ids = 0;
 
-	parametric = ctx->opt->schedule_parametric;
-	nparam = isl_space_dim(graph->node[0].space, isl_dim_param);
-	spatial_locality = has_any_spatial_proximity(graph);
-
-	if (!graph->id_list)
+	space = compute_lp_space(ctx, graph, &param_pos, &n_eq,
+		&n_ineq, use_coincidence);
+	if (!space)
 		return isl_stat_error;
 
-	if (spatial_locality) {
-		n_ids = graph->id_list->n;
-	} else {
-		n_ids = 1;
-	}
-	param_pos = 2 * n_ids + 2;
-	total = param_pos;
-	total += (2 * nparam + 1) * n_ids;
-
-	if (graph_sort_id_list(graph) < 0)
-		return isl_stat_error;
-
-	for (i = 0; i < graph->n; ++i) {
-		struct isl_sched_node *node = &graph->node[graph->sorted[i]];
-		if (node_update_cmap(node) < 0)
-			return isl_stat_error;
-		node->start = total;
-		total += 1 + node->nparam + 2 * node->nvar;
-	}
-
-	if (count_constraints(graph, &n_eq, &n_ineq, use_coincidence) < 0)
-		return isl_stat_error;
-	if (count_bound_constant_constraints(ctx, graph, &n_eq, &n_ineq) < 0)
-		return isl_stat_error;
-	if (count_bound_coefficient_constraints(ctx, graph, &n_eq, &n_ineq) < 0)
-		return isl_stat_error;
-
-	// TODO: should we add constraints for (spatial) proximity
-	// to n_ineq, n_eq here, or does the _extend function do it for us?
-	// Seems like it can reallocate if necessary, but faster to do it
-	// straight away.  For each spatial proximity map (multiple per edge),
-	// we add 2*size(coef) constraints (don't know if equations or inequalities)
-	// unless the edge is local, when we add size(coef) constraints for now.
-
-	space = isl_space_set_alloc(ctx, 0, total);
 	isl_basic_set_free(graph->lp);
-
-	// constraints for sums
-	n_eq += 2 * n_ids + parametric;
-
 	graph->lp = isl_basic_set_alloc_space(space, 0, n_eq, n_ineq);
-
-	// if (spatial_locality)
-		if (add_arraywise_sum_constraints(graph, spatial_locality) < 0)
-			return isl_stat_error;
-	// else
-	// 	if (add_sum_constraint(graph, 0, param_pos + 1, 2 * nparam) < 0)
-	// 		return isl_stat_error;
-
-	if (parametric && add_param_sum_constraint(graph, param_pos - 2) < 0)
-		return isl_stat_error;
-	if (add_var_sum_constraint(graph, param_pos - 1) < 0)
-		return isl_stat_error;
-	if (add_bound_constant_constraints(ctx, graph) < 0)
-		return isl_stat_error;
-	if (add_bound_coefficient_constraints(ctx, graph) < 0)
+	if (!graph->lp)
 		return isl_stat_error;
 
-	if (!spatial_locality) {
-		if (add_all_proximity_constraints(graph, use_coincidence) < 0)
-			return isl_stat_error;
-	} else {
-		if (add_spatial_proximity_constraints(ctx, graph, use_coincidence) < 0)
-			return isl_stat_error;
-	}
-	if (add_all_validity_constraints(graph, use_coincidence) < 0)
-		return isl_stat_error;
-
-	graph->lp = isl_basic_set_simplify(graph->lp);
-
-	return isl_stat_ok;
+	return setup_lp_constraints(ctx, graph, param_pos, use_coincidence);
 }
 
 /* Analyze the conflicting constraint found by
@@ -6436,8 +6458,11 @@ static __isl_give isl_schedule_node *compute_schedule_finish_band(
  * Since there are only a finite number of dependences,
  * there will only be a finite number of iterations.
  */
-static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
-	struct isl_sched_graph *graph)
+static isl_stat compute_schedule_wcc_band4(isl_ctx *ctx,
+	struct isl_sched_graph *graph,
+	isl_stat (*lp_restrainer)(isl_ctx *, struct isl_sched_graph *, int),
+	isl_stat (*lp_constructor)(isl_ctx *, struct isl_sched_graph *, int),
+	__isl_give isl_vec *(*lp_solver)(struct isl_sched_graph *))
 {
 	int has_coincidence;
 	int use_coincidence;
@@ -6456,6 +6481,10 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 		force_coincidence = 1;
 
 	use_coincidence = has_coincidence;
+
+	if (lp_restrainer)
+		lp_restrainer(ctx, graph, use_coincidence);
+
 	while (graph->n_row < graph->maxvar) {
 		isl_vec *sol;
 		int violated;
@@ -6465,9 +6494,9 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 		graph->dst_scc = -1;
 
 		use_coincidence = use_coincidence && continue_coincidence;
-		if (setup_lp(ctx, graph, use_coincidence) < 0)
+		if (lp_constructor(ctx, graph, use_coincidence) < 0)
 			return isl_stat_error;
-		sol = solve_lp(graph);
+		sol = lp_solver(graph);
 		if (!sol)
 			return isl_stat_error;
 		if (sol->size == 0) {
@@ -6500,6 +6529,12 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 	}
 
 	return isl_stat_ok;
+}
+
+static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
+	struct isl_sched_graph *graph)
+{
+	return compute_schedule_wcc_band4(ctx, graph, NULL, &setup_lp, &solve_lp);
 }
 
 /* Compute a schedule for a connected dependence graph by considering
@@ -8374,6 +8409,312 @@ __isl_give isl_schedule *isl_schedule_constraints_compute_schedule(
 	isl_schedule_constraints_free(sc);
 
 	return sched;
+}
+
+static __isl_give isl_basic_map *basic_map_from_map(__isl_take isl_map *map)
+{
+	int n_basic_map;
+	isl_basic_map *basic_map;
+	isl_ctx *ctx;
+
+	if (!map)
+		return NULL;
+
+	n_basic_map = isl_map_n_basic_map(map);
+	ctx = isl_map_get_ctx(map);
+
+	if (n_basic_map == 0) {
+		basic_map = isl_basic_map_empty(isl_map_get_space(map));
+		isl_map_free(map);
+		return basic_map;
+	}
+
+	if (n_basic_map != 1) {
+		isl_map_free(map);
+		isl_die(ctx, isl_error_internal, "map has more than one basic map",
+			return NULL);
+	}
+
+	basic_map = isl_basic_map_copy(map->p[0]);
+	isl_map_free(map);
+	return basic_map;
+}
+
+// normally, we should be able to get the partial schedule from schedule_node, intersect it with the universe set obtained from the space of the sched_node (to keep only the relevant statement), use it to set up node->sched, then use node_update_cmap to get everything else updated
+//graph.n_row // number of linearly independent dimensions
+// => get partial schedule, convert it into matrix (node->cmap/node->cinv are still initialized? no, they belong to sched_node, not schedule_node; after the previous step we can) and compute the rank; do this for all nodes and compute the maximum
+//graph.n_total_row // number of already scheduled dimensions, including current band
+// => get partial schedule, get the number of output dimensions, compute the maximum across all nodes (must be the same)
+//graph.band_start // where the current band starts
+static isl_stat reconstruct_sched_nodes(struct isl_sched_graph *graph,
+	__isl_keep isl_schedule_node *schedule_tree_node)
+{
+	int i;
+	isl_union_map *node_schedule_union =
+		isl_schedule_node_band_get_partial_schedule_union_map(
+			schedule_tree_node);
+	isl_ctx *ctx = isl_union_map_get_ctx(node_schedule_union);
+	int n_member = isl_schedule_node_band_n_member(schedule_tree_node);
+
+	for (i = 0; i < graph->n; ++i) {
+		struct isl_sched_node *nd = &graph->node[i];
+		isl_space *space = nd->space;
+		isl_set *domain_set = isl_set_universe(space);
+		isl_union_set *domain = isl_union_set_from_set(domain_set);
+		isl_union_map *schedule_union = isl_union_map_intersect_domain(
+			isl_union_map_copy(node_schedule_union), domain);
+		isl_map *schedule_map = isl_map_from_union_map(schedule_union);
+		isl_basic_map *schedule;
+		isl_mat *eq, *ineq;
+		int n_dim, scheduled_dims;
+
+		schedule = basic_map_from_map(schedule_map);
+		if (!schedule) {
+			isl_union_map_free(node_schedule_union);
+			return isl_stat_error;
+		}
+
+		// TODO: sched is supposed to have cst, then param, then input
+		// but apparently no output or divs...
+		eq = isl_basic_map_equalities_matrix(schedule,
+			isl_dim_cst, isl_dim_param, isl_dim_in, isl_dim_out, isl_dim_div);
+		ineq = isl_basic_map_inequalities_matrix(schedule,
+			isl_dim_cst, isl_dim_param, isl_dim_in, isl_dim_out, isl_dim_div);
+		if (isl_mat_rows(ineq) != 0) {
+			isl_mat_free(eq);
+			isl_mat_free(ineq);
+			isl_union_map_free(node_schedule_union);
+			isl_die(ctx, isl_error_internal,
+				"schedule contains inequalities", return isl_stat_error);
+		}
+		isl_mat_free(ineq);
+
+		n_dim = 1 + isl_basic_map_dim(schedule, isl_dim_param) +
+			isl_basic_map_dim(schedule, isl_dim_in);
+
+		eq = isl_mat_drop_cols(eq, n_dim, isl_mat_cols(eq) - n_dim);
+
+		isl_mat_free(nd->sched);
+		nd->sched = eq;
+		node_update_cmap(nd);
+
+		if (nd->rank > graph->n_row)
+			graph->n_row = nd->rank;
+
+		scheduled_dims = isl_mat_rows(nd->sched);
+		if (graph->n_total_row == 0) {
+			graph->n_total_row = scheduled_dims;
+		} else if (graph->n_total_row != scheduled_dims) {
+			isl_union_map_free(node_schedule_union);
+			isl_die(ctx, isl_error_internal,
+				"partial schedule has different dimension for nodes",
+				return isl_stat_error);
+		}
+	}
+	graph->band_start = graph->n_total_row - n_member;
+	isl_union_map_free(node_schedule_union);
+	return isl_stat_ok;
+}
+
+// in each node
+// take the last (graph->n_total_row - graph->band_start) dimensions
+// start setting up LP so that only the dimensions that are already used
+// in the schedule are keep being used
+// drop selected last dimensions from the schedule as they are going to be recomputed
+static isl_stat compute_lp_restrain(isl_ctx *ctx, struct isl_sched_graph *graph,
+	int use_coincidence)
+{
+	isl_basic_set *lp;
+	int band_depth = graph->n_total_row - graph->band_start;
+	int i, j, l;
+	int n_eq, n_ineq, total;
+	int n_param = isl_space_dim(graph->node[0].space, isl_dim_param);
+	isl_space *space;
+	int n_ids, param_pos;
+
+	space = compute_lp_space(ctx, graph, &param_pos, &n_eq, &n_ineq,
+		use_coincidence);
+	if (!space)
+		return isl_stat_error;
+	total = isl_space_dim(space, isl_dim_set);
+
+	int dim_max = 0;
+	for (i = 0; i < graph->n; ++i) {
+		int dim = isl_space_dim(graph->node[i].space, isl_dim_set);
+		if (dim > dim_max)
+			dim_max = dim;
+	}
+
+	int *dim_used_all = isl_calloc_array(ctx, int, dim_max * graph->n);
+	int total_unused_dim = 0;
+
+	for (i = 0; i < graph->n; ++i) {
+		struct isl_sched_node *nd = &graph->node[i];
+		int n_rows = isl_mat_rows(nd->sched);
+		int n_cols = isl_mat_cols(nd->sched);
+		isl_mat *band_sched = isl_mat_sub_alloc(nd->sched,
+			n_rows - band_depth, band_depth, 0, n_cols);
+		int *dim_used = &dim_used_all[i * dim_max];
+		int n_dims = isl_space_dim(nd->space, isl_dim_set);
+		int k;
+
+		// collect dimensions that are not used in the current band_sched
+		for (j = 0; j < band_depth; ++j) {
+			for (l = 0; l < n_dims; ++l) {
+				isl_val *v;
+
+				v = isl_mat_get_element_val(band_sched, j,
+					1 + n_param + l);
+				if (!isl_val_is_zero(v)) {
+					dim_used[l] = 1;
+					isl_val_free(v);
+					break;
+				}
+				isl_val_free(v);
+			}
+		}
+		isl_mat_free(band_sched);
+
+		for (l = 0; l < n_dims; ++l)
+			if (!dim_used[l])
+				++total_unused_dim;
+	}
+
+	// lp = graph->lp;
+	lp = isl_basic_set_alloc_space(space, 0, 2 * total_unused_dim, 0);
+	for (i = 0; i < graph->n; ++i) {
+		struct isl_sched_node *nd = &graph->node[i];
+		int k;
+		int n_dims = isl_space_dim(nd->space, isl_dim_set);
+		int n_rows = isl_mat_rows(nd->sched);
+		int *dim_used = &dim_used_all[i * dim_max];
+
+		// can't we do this with trivial/non-trivial ranges in LP solution?
+		// => not necessarily, we want dims limited from both sides, which does
+		// not seem achievable using trivial regions (there is no way to force a
+		// region to be trivial)
+
+		// actually, there is this thing with dimension reordering due to cmap
+		// in setup_lp, so i'm not sure looking at dims in sched is correct
+		// in setup_lp, first dims always correspond to the already scheduled
+		// ones even in case of interchange, so it may make sense to mimic that
+		// behavior, e.g. just keep dims from old band_start to band_start+depth
+		// or look at the cmap rather than at the sched
+
+		// for each dimension that is not used, make sure it is still not used
+		for (j = 0; j < n_dims; ++j) {
+			if (dim_used[j])
+				continue;
+
+			k = isl_basic_set_alloc_equality(lp);
+			if (k < 0)
+				return isl_stat_error;
+			isl_seq_clr(lp->eq[k], 1 + total);
+			isl_int_set_si(lp->eq[k][1 + nd->start + 2 * j], 1);
+
+			k = isl_basic_set_alloc_equality(lp);
+			if (k < 0)
+				return isl_stat_error;
+			isl_seq_clr(lp->eq[k], 1 + total);
+			isl_int_set_si(lp->eq[k][1 + nd->start + 2 * j + 1], 1);
+		}
+
+		nd->sched = isl_mat_drop_rows(nd->sched,
+			n_rows - band_depth, band_depth);
+		if (node_update_cmap(nd) < 0)
+			return isl_stat_error;
+	}
+	free(dim_used_all);
+	isl_basic_set_free(graph->lp_restrain);
+	graph->lp_restrain = lp;
+
+	graph->n_total_row = graph->band_start;
+	graph->n_row -= band_depth;  // FIXME: is this okay? it assumes there was at least one node in the graph where the band did not have linearly dependent dimensions
+
+	return isl_stat_ok;
+}
+
+static isl_stat setup_recompute_lp(isl_ctx *ctx,
+	struct isl_sched_graph *graph, int use_coincidence)
+{
+	if (setup_lp(ctx, graph, use_coincidence) < 0)
+		return isl_stat_error;
+
+	graph->lp = isl_basic_set_intersect(graph->lp,
+		isl_basic_set_copy(graph->lp_restrain));
+	if (!graph->lp)
+		return isl_stat_error;
+
+	return isl_stat_ok;
+}
+
+static isl_stat recompute_schedule_wcc_band(
+	isl_ctx *ctx, struct isl_sched_graph *graph)
+{
+	return compute_schedule_wcc_band4(ctx, graph, &compute_lp_restrain,
+		&setup_recompute_lp, &solve_lp);
+
+	// TODO: check that we have the same number of linearly independent dimensions
+	// as before (isn't this on a per-node basis?)
+}
+
+/* Recompute schedule for the "node" only, keeping everything else intact,
+ * using given constraints "sc", potentially different from the original
+ * constraints.
+ * "node" must be a band node.
+ *
+ * returns an updated schedule node
+ */
+__isl_give isl_schedule_node *isl_schedule_constraints_recompute_schedule(
+	__isl_take isl_schedule_constraints *sc,
+	__isl_take isl_schedule_node *node)
+{
+	isl_ctx *ctx;
+	isl_space *schedule_space;
+	int n_band_dims;
+	struct isl_sched_graph graph = { 0 };
+
+	if (!sc || !node)
+		goto error;
+
+	if (isl_schedule_node_get_type(node) != isl_schedule_node_band)
+		goto error;
+
+	ctx = isl_schedule_constraints_get_ctx(sc);
+	sc = isl_schedule_constraints_align_params(sc);
+
+	if (graph_init(&graph, sc) < 0)
+		goto error;
+
+	if (compute_maxvar(&graph) < 0)
+		goto error2;
+
+	if (reconstruct_sched_nodes(&graph, node) < 0)
+		goto error2;
+
+	if (detect_sccs(ctx, &graph) < 0)
+		goto error2;
+
+	node = isl_schedule_node_parent(node);
+	node = isl_schedule_node_reset_children(node);
+	node = isl_schedule_node_child(node, 0);
+
+	if (recompute_schedule_wcc_band(ctx, &graph) < 0)
+		goto error2;
+
+	// TODO: this will continue computation, but we may want to stop it?
+	// if band splitting is allowed, when do we stop it?
+	node = compute_schedule_finish_band(node, &graph, 1);
+
+	graph_free(ctx, &graph);
+	return node;
+
+error2:
+	graph_free(ctx, &graph);
+
+error:
+	isl_schedule_constraints_free(sc);
+	return isl_schedule_node_free(node);
 }
 
 /* Compute a schedule for the given union of domains that respects
