@@ -8563,13 +8563,13 @@ static isl_stat compute_lp_restrain(isl_ctx *ctx, struct isl_sched_graph *graph,
 			for (l = 0; l < n_dims; ++l) {
 				isl_val *v;
 
+				if (dim_used[l])
+					continue;
+
 				v = isl_mat_get_element_val(band_sched, j,
 					1 + n_param + l);
-				if (!isl_val_is_zero(v)) {
+				if (!isl_val_is_zero(v))
 					dim_used[l] = 1;
-					isl_val_free(v);
-					break;
-				}
 				isl_val_free(v);
 			}
 		}
@@ -8610,13 +8610,13 @@ static isl_stat compute_lp_restrain(isl_ctx *ctx, struct isl_sched_graph *graph,
 			if (k < 0)
 				return isl_stat_error;
 			isl_seq_clr(lp->eq[k], 1 + total);
-			isl_int_set_si(lp->eq[k][1 + nd->start + 2 * j], 1);
+			isl_int_set_si(lp->eq[k][2 + n_param + nd->start + 2 * j], 1);
 
 			k = isl_basic_set_alloc_equality(lp);
 			if (k < 0)
 				return isl_stat_error;
 			isl_seq_clr(lp->eq[k], 1 + total);
-			isl_int_set_si(lp->eq[k][1 + nd->start + 2 * j + 1], 1);
+			isl_int_set_si(lp->eq[k][2 + n_param + nd->start + 2 * j + 1], 1);
 		}
 
 		nd->sched = isl_mat_drop_rows(nd->sched,
