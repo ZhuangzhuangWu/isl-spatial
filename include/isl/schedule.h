@@ -123,6 +123,7 @@ __isl_give isl_schedule *isl_schedule_empty(__isl_take isl_space *space);
 __isl_give isl_schedule *isl_schedule_from_domain(
 	__isl_take isl_union_set *domain);
 __isl_give isl_schedule *isl_schedule_copy(__isl_keep isl_schedule *sched);
+__isl_give isl_schedule *isl_schedule_cow(__isl_keep isl_schedule *sched);
 __isl_null isl_schedule *isl_schedule_free(__isl_take isl_schedule *sched);
 __isl_export
 __isl_give isl_union_map *isl_schedule_get_map(__isl_keep isl_schedule *sched);
