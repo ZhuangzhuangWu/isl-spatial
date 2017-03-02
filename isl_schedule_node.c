@@ -1544,6 +1544,22 @@ __isl_give isl_schedule_node *isl_schedule_node_band_permute(
 	return node;
 }
 
+__isl_give isl_schedule_node *isl_schedule_node_band_reset_schedule(
+	__isl_take isl_schedule_node *node,
+	__isl_take isl_multi_union_pw_aff *schedule)
+{
+	isl_schedule_tree *tree;
+
+	if (!node)
+		return NULL;
+	if (!schedule)
+		return isl_schedule_node_free(node);
+
+	tree = isl_schedule_tree_copy(node->tree);
+	tree = isl_schedule_tree_band_set_partial_schedule(tree, schedule);
+	return isl_schedule_node_graft_tree(node, tree);
+}
+
 /* Return the schedule space of the band node.
  */
 __isl_give isl_space *isl_schedule_node_band_get_space(
