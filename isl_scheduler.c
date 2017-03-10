@@ -7147,6 +7147,7 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 	int force_coincidence = 0;
 	int check_conditional;
 	int continue_coincidence = 1;
+	int avoid_inner;
 
 	if (sort_sccs(graph) < 0)
 		return isl_stat_error;
@@ -7157,6 +7158,8 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 
 	if (ctx->opt->schedule_outer_coincidence)
 		force_coincidence = 1;
+
+	avoid_inner = ctx->opt->schedule_avoid_inner_coincidence;
 
 	use_coincidence = has_coincidence;
 	while (graph->n_row < graph->maxvar) {
@@ -7175,11 +7178,12 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 			return isl_stat_error;
 		if (sol->size == 0) {
 			int empty = graph->n_total_row == graph->band_start;
-			int remaining = graph->maxvar - graph->n_row;
+			int keep_band = avoid_inner &&
+				((graph->maxvar - graph->n_row) <= 2);
 
 			isl_vec_free(sol);
 			if (use_coincidence &&
-			    (!force_coincidence || !empty || remaining <= 2)) {
+			    (!force_coincidence || !empty || keep_band)) {
 				use_coincidence = 0;
 				continue;
 			}
