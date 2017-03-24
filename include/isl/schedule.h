@@ -88,6 +88,10 @@ __isl_give isl_schedule_constraints *
 isl_schedule_constraints_set_counted_accesses(
 	__isl_take isl_schedule_constraints *sc,
 	__isl_take isl_union_map *counted_accesses);
+__isl_give isl_schedule_constraints *
+isl_schedule_constraints_set_dep_rar(
+	__isl_take isl_schedule_constraints *sc,
+	__isl_take isl_union_map *dep_rar);
 __isl_null isl_schedule_constraints *isl_schedule_constraints_free(
 	__isl_take isl_schedule_constraints *sc);
 

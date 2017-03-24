@@ -183,6 +183,7 @@ struct isl_schedule_constraints {
 
 	isl_union_map *constraint[isl_edge_last + 1];
 	isl_union_map *counted_accesses;
+	isl_union_map *dep_rar;
 };
 
 __isl_give isl_schedule_constraints *isl_schedule_constraints_copy(
@@ -271,6 +272,21 @@ error:
 	isl_schedule_constraints_free(sc);
 	isl_union_map_free(counted_accesses);
 	return NULL;
+}
+
+__isl_give isl_schedule_constraints *
+isl_schedule_constraints_set_dep_rar(
+	__isl_take isl_schedule_constraints *sc,
+	__isl_take isl_union_map *dep_rar)
+{
+	if (!sc || !dep_rar) {
+		isl_union_map_free(dep_rar);
+		return isl_schedule_constraints_free(sc);
+	}
+
+	isl_union_map_free(sc->dep_rar);
+	sc->dep_rar = dep_rar;
+	return sc;
 }
 
 /* Replace the context of "sc" by "context".
@@ -404,6 +420,7 @@ __isl_null isl_schedule_constraints *isl_schedule_constraints_free(
 	for (i = isl_edge_first; i <= isl_edge_last; ++i)
 		isl_union_map_free(sc->constraint[i]);
 	isl_union_map_free(sc->counted_accesses);
+	isl_union_map_free(sc->dep_rar);
 
 	free(sc);
 
@@ -600,6 +617,8 @@ __isl_give isl_schedule_constraints *isl_schedule_constraints_apply(
 	if (!sc->counted_accesses)
 		goto error;
 
+	sc->dep_rar = apply(sc->dep_rar, umap, 0);
+
 	sc->domain = isl_union_set_apply(sc->domain, umap);
 	if (!sc->domain)
 		return isl_schedule_constraints_free(sc);
@@ -660,6 +679,8 @@ isl_schedule_constraints_align_params(__isl_take isl_schedule_constraints *sc)
 			space = isl_space_free(space);
 	}
 	sc->counted_accesses = isl_union_map_align_params(sc->counted_accesses,
+		isl_space_copy(space));
+	sc->dep_rar = isl_union_map_align_params(sc->dep_rar,
 		isl_space_copy(space));
 	sc->context = isl_set_align_params(sc->context, isl_space_copy(space));
 	sc->domain = isl_union_set_align_params(sc->domain, space);
@@ -1276,6 +1297,7 @@ struct isl_sched_graph {
 
 	isl_id_list *id_list; // used by setup_lp in spatial proximity mode
 	isl_union_map *counted_accesses;
+	isl_union_map *dep_rar;
 	struct isl_hash_table *id_rank_table;
 	isl_id_to_id *ref_to_array;
 	struct isl_hash_table *array_to_ref;
@@ -1579,6 +1601,7 @@ static int graph_alloc(isl_ctx *ctx, struct isl_sched_graph *graph,
 	graph->intra_hmap = isl_map_to_basic_set_alloc(ctx, 2 * n_edge);
 	graph->inter_hmap = isl_map_to_basic_set_alloc(ctx, 2 * n_edge);
 	graph->counted_accesses = NULL;
+	graph->dep_rar = NULL;
 
 	graph->ref_to_array = isl_id_to_id_alloc(ctx, 1);
 	graph->array_to_ref = isl_hash_table_alloc(ctx, 1);
@@ -1633,6 +1656,7 @@ static void graph_free(isl_ctx *ctx, struct isl_sched_graph *graph)
 	isl_hash_table_free(ctx, graph->node_table);
 	isl_basic_set_free(graph->lp);
 	isl_union_map_free(graph->counted_accesses);
+	isl_union_map_free(graph->dep_rar);
 	isl_id_to_id_free(graph->ref_to_array);
 	if (!graph->array_to_ref_borrowed)
 		array_to_ref_free(ctx, graph->array_to_ref);
@@ -2472,6 +2496,8 @@ static isl_stat graph_init(struct isl_sched_graph *graph,
 	init_ref_to_array(graph);
 	graph->array_to_ref_borrowed = 0;
 
+	graph->dep_rar = isl_union_map_copy(sc->dep_rar);
+
 	return isl_stat_ok;
 }
 
@@ -2912,7 +2938,7 @@ static isl_stat add_inter_validity_constraints(struct isl_sched_graph *graph,
  * their distances bounded by 0 from below.
  */
 static isl_stat add_intra_proximity_constraints(struct isl_sched_graph *graph,
-	struct isl_sched_edge *edge, int s, int local)
+	struct isl_sched_edge *edge, int s, int local, int pos/*1*/, int start/*5*/)
 {
 	int offset;
 	unsigned nparam;
@@ -2935,9 +2961,9 @@ static isl_stat add_intra_proximity_constraints(struct isl_sched_graph *graph,
 	dim_map = intra_dim_map(ctx, graph, node, offset, -s);
 
 	if (!local) {
-		isl_dim_map_range(dim_map, 1, 0, 0, 0, 1, 1);
-		isl_dim_map_range(dim_map, 5, 2, 1, 1, nparam, -1);
-		isl_dim_map_range(dim_map, 6, 2, 1, 1, nparam, 1);
+		isl_dim_map_range(dim_map, pos, 0, 0, 0, 1, 1);
+		isl_dim_map_range(dim_map, start, 2, 1, 1, nparam, -1);
+		isl_dim_map_range(dim_map, start + 1, 2, 1, 1, nparam, 1);
 	}
 
 	graph->lp = isl_basic_set_extend_constraints(graph->lp,
@@ -3000,7 +3026,7 @@ static isl_stat add_intra_proximity_constraints(struct isl_sched_graph *graph,
  * their distances bounded by 0 from below.
  */
 static isl_stat add_inter_proximity_constraints(struct isl_sched_graph *graph,
-	struct isl_sched_edge *edge, int s, int local)
+	struct isl_sched_edge *edge, int s, int local, int pos/*1*/, int start/*5*/)
 {
 	int offset;
 	unsigned nparam;
@@ -3026,9 +3052,9 @@ static isl_stat add_inter_proximity_constraints(struct isl_sched_graph *graph,
 	dim_map = inter_dim_map(ctx, graph, src, dst, offset, -s);
 
 	if (!local) {
-		isl_dim_map_range(dim_map, 1, 0, 0, 0, 1, 1);
-		isl_dim_map_range(dim_map, 5, 2, 1, 1, nparam, -1);
-		isl_dim_map_range(dim_map, 6, 2, 1, 1, nparam, 1);
+		isl_dim_map_range(dim_map, pos, 0, 0, 0, 1, 1);
+		isl_dim_map_range(dim_map, start, 2, 1, 1, nparam, -1);
+		isl_dim_map_range(dim_map, start+1, 2, 1, 1, nparam, 1);
 	}
 
 	graph->lp = isl_basic_set_extend_constraints(graph->lp,
@@ -3284,7 +3310,7 @@ static int add_all_validity_constraints(struct isl_sched_graph *graph,
  * Otherwise, we ignore them.
  */
 static int add_all_proximity_constraints(struct isl_sched_graph *graph,
-	int use_coincidence)
+	int use_coincidence, int pos/*1*/, int start/*5*/)
 {
 	int i;
 
@@ -3298,18 +3324,18 @@ static int add_all_proximity_constraints(struct isl_sched_graph *graph,
 			continue;
 
 		if (edge->src == edge->dst &&
-		    add_intra_proximity_constraints(graph, edge, 1, local) < 0)
+		    add_intra_proximity_constraints(graph, edge, 1, local, pos, start) < 0)
 			return -1;
 		if (edge->src != edge->dst &&
-		    add_inter_proximity_constraints(graph, edge, 1, local) < 0)
+		    add_inter_proximity_constraints(graph, edge, 1, local, pos, start) < 0)
 			return -1;
 		if (is_validity(edge) || local)
 			continue;
 		if (edge->src == edge->dst &&
-		    add_intra_proximity_constraints(graph, edge, -1, 0) < 0)
+		    add_intra_proximity_constraints(graph, edge, -1, 0, pos, start) < 0)
 			return -1;
 		if (edge->src != edge->dst &&
-		    add_inter_proximity_constraints(graph, edge, -1, 0) < 0)
+		    add_inter_proximity_constraints(graph, edge, -1, 0, pos, start) < 0)
 			return -1;
 	}
 
@@ -4341,6 +4367,46 @@ static isl_stat graph_sort_id_list(struct isl_sched_graph *graph)
 	return isl_stat_ok;
 }
 
+static void remove_temporal_from_spatial_proximity(struct isl_sched_graph *graph)
+{
+	int i;
+	for (i = 0; i < graph->n_edge; ++i) {
+		struct isl_sched_edge *edge = &graph->edge[i];
+		struct isl_sched_edge *proximity_edge;
+		isl_union_map *umap, *temporal_deps;
+		if (!is_spatial_proximity(edge))
+			continue;
+		proximity_edge = graph_find_edge(graph, isl_edge_proximity,
+			edge->src, edge->dst);
+		if (!proximity_edge)
+			continue;
+		edge->map = isl_map_subtract(edge->map,
+			isl_map_copy(proximity_edge->map));
+
+		// workaround empty maps
+		umap = isl_union_map_from_map(isl_map_copy(edge->map));
+		umap = isl_union_map_subtract(umap, isl_union_map_copy(graph->dep_rar));
+		if (isl_union_map_is_empty(umap) == isl_bool_true) {
+			isl_space *space = isl_map_get_space(edge->map);
+			isl_map_free(edge->map);
+			edge->map = isl_map_empty(space);
+		} else {
+			edge->map = isl_map_from_union_map(umap);
+		}
+
+		// FIXME: not sure this is correct: proximity edge may not be between the same references as spatial?  but proximity is reference-less, so it must involve all references, so seems fine
+		umap = isl_union_map_copy(edge->array_tagged_map);
+		umap = isl_union_map_factor_range(umap);
+		temporal_deps = isl_union_map_from_map(
+			isl_map_copy(proximity_edge->map));
+		temporal_deps = isl_union_map_union(temporal_deps,
+			isl_union_map_copy(graph->dep_rar));
+		umap = isl_union_map_product(temporal_deps, umap);
+		edge->array_tagged_map = isl_union_map_subtract(
+			edge->array_tagged_map, umap);
+	}
+}
+
 /* Construct an ILP problem for finding schedule coefficients
  * that result in non-negative, but small dependence distances
  * over all dependences.
@@ -4402,8 +4468,8 @@ static isl_stat setup_lp(isl_ctx *ctx, struct isl_sched_graph *graph,
 
 	parametric = ctx->opt->schedule_parametric;
 	nparam = isl_space_dim(graph->node[0].space, isl_dim_param);
-	spatial_locality = has_any_spatial_proximity(graph) &&
-		graph->n_row != graph->maxvar - 1;
+	spatial_locality = has_any_spatial_proximity(graph);// &&
+		//graph->n_row != graph->maxvar - 1;
 
 	if (!graph->id_list)
 		return isl_stat_error;
@@ -4416,9 +4482,20 @@ static isl_stat setup_lp(isl_ctx *ctx, struct isl_sched_graph *graph,
 	param_pos = 2 * n_ids + 2;
 	total = param_pos;
 	total += (2 * nparam + 1) * n_ids;
+	int temporal = total;
+	total += 2 + 2 * nparam;
 
 	if (graph_sort_id_list(graph) < 0)
 		return isl_stat_error;
+
+#if 0
+	if (graph->n_row == graph->maxvar - 2) {
+		fprintf(stderr, "[isl] last row schedule modifications\n");
+		spatial_locality = has_any_spatial_proximity(graph);
+		// remove proximity from spatial proximity
+		remove_temporal_from_spatial_proximity(graph);
+	}
+#endif
 
 	for (i = 0; i < graph->n; ++i) {
 		struct isl_sched_node *node = &graph->node[graph->sorted[i]];
@@ -4446,7 +4523,7 @@ static isl_stat setup_lp(isl_ctx *ctx, struct isl_sched_graph *graph,
 	isl_basic_set_free(graph->lp);
 
 	// 2*n_ids arraywise sums + equality for parametric + equality for var_sum
-	n_eq += 2 * n_ids + parametric + 1;
+	n_eq += 2 * n_ids + parametric + 2;
 
 	graph->lp = isl_basic_set_alloc_space(space, 0, n_eq, n_ineq);
 
@@ -4457,6 +4534,9 @@ static isl_stat setup_lp(isl_ctx *ctx, struct isl_sched_graph *graph,
 	// 	if (add_sum_constraint(graph, 0, param_pos + 1, 2 * nparam) < 0)
 	// 		return isl_stat_error;
 
+	if (spatial_locality) {
+		add_groups_sum_constraint(graph, temporal, temporal + 2, 2*nparam, 1, 1);
+	}
 	if (parametric && add_param_sum_constraint(graph, param_pos - 2) < 0)
 		return isl_stat_error;
 	if (add_var_sum_cmapped(graph, param_pos - 1) < 0)
@@ -4467,11 +4547,13 @@ static isl_stat setup_lp(isl_ctx *ctx, struct isl_sched_graph *graph,
 		return isl_stat_error;
 
 	if (!spatial_locality) {
-		if (add_all_proximity_constraints(graph, use_coincidence) < 0)
+		if (add_all_proximity_constraints(graph, use_coincidence, 1, 5) < 0)
 			return isl_stat_error;
 	} else {
 		if (add_spatial_proximity_constraints(ctx, graph, use_coincidence) < 0)
 			return isl_stat_error;
+		add_all_proximity_constraints(graph, use_coincidence,
+			temporal + 1, temporal + 2);
 	}
 	if (add_all_validity_constraints(graph, use_coincidence) < 0)
 		return isl_stat_error;
@@ -5314,7 +5396,7 @@ static int extract_sub_graph(isl_ctx *ctx, struct isl_sched_graph *graph,
 	sub->array_to_ref_borrowed = 1;
 	if (graph_init_id_rank_table(ctx, sub) < 0)
 		return -1;
-
+	sub->dep_rar = isl_union_map_copy(graph->dep_rar);
 
 	return 0;
 }
@@ -6234,6 +6316,8 @@ static __isl_give isl_schedule_node *carry_dependences(
 	if (trivial)
 		graph->n_row--;
 
+	remove_temporal_from_spatial_proximity(graph);
+
 	return split_scaled(node, graph);
 }
 
@@ -6725,6 +6809,7 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 		if (setup_lp(ctx, graph, use_coincidence) < 0)
 			return isl_stat_error;
 		sol = solve_lp(graph);
+		isl_vec_dump(sol);
 		if (!sol)
 			return isl_stat_error;
 		if (sol->size == 0) {
@@ -7335,6 +7420,13 @@ static __isl_give isl_schedule_constraints *collect_constraints(
 		counted_cluster_map);
 	sc = isl_schedule_constraints_set_counted_accesses(sc,
 		counted_accesses);
+
+	isl_union_map *dep_rar = isl_union_map_apply_domain(
+		isl_union_map_copy(graph->dep_rar),
+		isl_union_map_copy(cluster_map));
+	dep_rar = isl_union_map_apply_range(dep_rar,
+		isl_union_map_copy(cluster_map));
+	sc = isl_schedule_constraints_set_dep_rar(sc, dep_rar);
 
 	return sc;
 }
