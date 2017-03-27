@@ -1298,6 +1298,7 @@ struct isl_sched_graph {
 	isl_id_list *id_list; // used by setup_lp in spatial proximity mode
 	isl_union_map *counted_accesses;
 	isl_union_map *dep_rar;
+	int separate_spatial;
 	struct isl_hash_table *id_rank_table;
 	isl_id_to_id *ref_to_array;
 	struct isl_hash_table *array_to_ref;
@@ -2497,6 +2498,7 @@ static isl_stat graph_init(struct isl_sched_graph *graph,
 	graph->array_to_ref_borrowed = 0;
 
 	graph->dep_rar = isl_union_map_copy(sc->dep_rar);
+	graph->separate_spatial = 0;
 
 	return isl_stat_ok;
 }
@@ -4405,6 +4407,7 @@ static void remove_temporal_from_spatial_proximity(struct isl_sched_graph *graph
 		edge->array_tagged_map = isl_union_map_subtract(
 			edge->array_tagged_map, umap);
 	}
+	graph->separate_spatial = 1;
 }
 
 /* Construct an ILP problem for finding schedule coefficients
@@ -4496,6 +4499,7 @@ static isl_stat setup_lp(isl_ctx *ctx, struct isl_sched_graph *graph,
 		remove_temporal_from_spatial_proximity(graph);
 	}
 #endif
+	int last_dim = graph->separate_spatial && (graph->n_row != graph->maxvar - 1);
 
 	for (i = 0; i < graph->n; ++i) {
 		struct isl_sched_node *node = &graph->node[graph->sorted[i]];
@@ -4534,7 +4538,7 @@ static isl_stat setup_lp(isl_ctx *ctx, struct isl_sched_graph *graph,
 	// 	if (add_sum_constraint(graph, 0, param_pos + 1, 2 * nparam) < 0)
 	// 		return isl_stat_error;
 
-	if (spatial_locality) {
+	if (spatial_locality && last_dim) {
 		add_groups_sum_constraint(graph, temporal, temporal + 2, 2*nparam, 1, 1);
 	}
 	if (parametric && add_param_sum_constraint(graph, param_pos - 2) < 0)
@@ -4552,8 +4556,9 @@ static isl_stat setup_lp(isl_ctx *ctx, struct isl_sched_graph *graph,
 	} else {
 		if (add_spatial_proximity_constraints(ctx, graph, use_coincidence) < 0)
 			return isl_stat_error;
-		add_all_proximity_constraints(graph, use_coincidence,
-			temporal + 1, temporal + 2);
+		if (last_dim)
+			add_all_proximity_constraints(graph, use_coincidence,
+				temporal + 1, temporal + 2);
 	}
 	if (add_all_validity_constraints(graph, use_coincidence) < 0)
 		return isl_stat_error;
