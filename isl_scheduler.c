@@ -183,7 +183,6 @@ struct isl_schedule_constraints {
 
 	isl_union_map *constraint[isl_edge_last + 1];
 	isl_union_map *counted_accesses;
-	isl_union_map *dep_rar;
 };
 
 __isl_give isl_schedule_constraints *isl_schedule_constraints_copy(
@@ -272,21 +271,6 @@ error:
 	isl_schedule_constraints_free(sc);
 	isl_union_map_free(counted_accesses);
 	return NULL;
-}
-
-__isl_give isl_schedule_constraints *
-isl_schedule_constraints_set_dep_rar(
-	__isl_take isl_schedule_constraints *sc,
-	__isl_take isl_union_map *dep_rar)
-{
-	if (!sc || !dep_rar) {
-		isl_union_map_free(dep_rar);
-		return isl_schedule_constraints_free(sc);
-	}
-
-	isl_union_map_free(sc->dep_rar);
-	sc->dep_rar = dep_rar;
-	return sc;
 }
 
 /* Replace the context of "sc" by "context".
@@ -420,7 +404,6 @@ __isl_null isl_schedule_constraints *isl_schedule_constraints_free(
 	for (i = isl_edge_first; i <= isl_edge_last; ++i)
 		isl_union_map_free(sc->constraint[i]);
 	isl_union_map_free(sc->counted_accesses);
-	isl_union_map_free(sc->dep_rar);
 
 	free(sc);
 
@@ -617,8 +600,6 @@ __isl_give isl_schedule_constraints *isl_schedule_constraints_apply(
 	if (!sc->counted_accesses)
 		goto error;
 
-	sc->dep_rar = apply(sc->dep_rar, umap, 0);
-
 	sc->domain = isl_union_set_apply(sc->domain, umap);
 	if (!sc->domain)
 		return isl_schedule_constraints_free(sc);
@@ -679,8 +660,6 @@ isl_schedule_constraints_align_params(__isl_take isl_schedule_constraints *sc)
 			space = isl_space_free(space);
 	}
 	sc->counted_accesses = isl_union_map_align_params(sc->counted_accesses,
-		isl_space_copy(space));
-	sc->dep_rar = isl_union_map_align_params(sc->dep_rar,
 		isl_space_copy(space));
 	sc->context = isl_set_align_params(sc->context, isl_space_copy(space));
 	sc->domain = isl_union_set_align_params(sc->domain, space);
@@ -1297,7 +1276,6 @@ struct isl_sched_graph {
 
 	isl_id_list *id_list; // used by setup_lp in spatial proximity mode
 	isl_union_map *counted_accesses;
-	isl_union_map *dep_rar;
 	struct isl_hash_table *id_rank_table;
 	isl_id_to_id *ref_to_array;
 	struct isl_hash_table *array_to_ref;
@@ -1601,7 +1579,6 @@ static int graph_alloc(isl_ctx *ctx, struct isl_sched_graph *graph,
 	graph->intra_hmap = isl_map_to_basic_set_alloc(ctx, 2 * n_edge);
 	graph->inter_hmap = isl_map_to_basic_set_alloc(ctx, 2 * n_edge);
 	graph->counted_accesses = NULL;
-	graph->dep_rar = NULL;
 
 	graph->ref_to_array = isl_id_to_id_alloc(ctx, 1);
 	graph->array_to_ref = isl_hash_table_alloc(ctx, 1);
@@ -1656,7 +1633,6 @@ static void graph_free(isl_ctx *ctx, struct isl_sched_graph *graph)
 	isl_hash_table_free(ctx, graph->node_table);
 	isl_basic_set_free(graph->lp);
 	isl_union_map_free(graph->counted_accesses);
-	isl_union_map_free(graph->dep_rar);
 	isl_id_to_id_free(graph->ref_to_array);
 	if (!graph->array_to_ref_borrowed)
 		array_to_ref_free(ctx, graph->array_to_ref);
@@ -2495,8 +2471,6 @@ static isl_stat graph_init(struct isl_sched_graph *graph,
 		return isl_stat_error;
 	init_ref_to_array(graph);
 	graph->array_to_ref_borrowed = 0;
-
-	graph->dep_rar = isl_union_map_copy(sc->dep_rar);
 
 	return isl_stat_ok;
 }
@@ -5348,7 +5322,6 @@ static int extract_sub_graph(isl_ctx *ctx, struct isl_sched_graph *graph,
 	sub->array_to_ref_borrowed = 1;
 	if (graph_init_id_rank_table(ctx, sub) < 0)
 		return -1;
-	sub->dep_rar = isl_union_map_copy(graph->dep_rar);
 
 	return 0;
 }
@@ -7370,13 +7343,6 @@ static __isl_give isl_schedule_constraints *collect_constraints(
 		counted_cluster_map);
 	sc = isl_schedule_constraints_set_counted_accesses(sc,
 		counted_accesses);
-
-	isl_union_map *dep_rar = isl_union_map_apply_domain(
-		isl_union_map_copy(graph->dep_rar),
-		isl_union_map_copy(cluster_map));
-	dep_rar = isl_union_map_apply_range(dep_rar,
-		isl_union_map_copy(cluster_map));
-	sc = isl_schedule_constraints_set_dep_rar(sc, dep_rar);
 
 	return sc;
 }
