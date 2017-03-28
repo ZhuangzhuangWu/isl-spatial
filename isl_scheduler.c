@@ -1298,7 +1298,6 @@ struct isl_sched_graph {
 	isl_id_list *id_list; // used by setup_lp in spatial proximity mode
 	isl_union_map *counted_accesses;
 	isl_union_map *dep_rar;
-	int separate_spatial;
 	struct isl_hash_table *id_rank_table;
 	isl_id_to_id *ref_to_array;
 	struct isl_hash_table *array_to_ref;
@@ -2498,7 +2497,6 @@ static isl_stat graph_init(struct isl_sched_graph *graph,
 	graph->array_to_ref_borrowed = 0;
 
 	graph->dep_rar = isl_union_map_copy(sc->dep_rar);
-	graph->separate_spatial = 0;
 
 	return isl_stat_ok;
 }
@@ -4369,47 +4367,6 @@ static isl_stat graph_sort_id_list(struct isl_sched_graph *graph)
 	return isl_stat_ok;
 }
 
-static void remove_temporal_from_spatial_proximity(struct isl_sched_graph *graph)
-{
-	int i;
-	for (i = 0; i < graph->n_edge; ++i) {
-		struct isl_sched_edge *edge = &graph->edge[i];
-		struct isl_sched_edge *proximity_edge;
-		isl_union_map *umap, *temporal_deps;
-		if (!is_spatial_proximity(edge))
-			continue;
-		proximity_edge = graph_find_edge(graph, isl_edge_proximity,
-			edge->src, edge->dst);
-		if (!proximity_edge)
-			continue;
-		edge->map = isl_map_subtract(edge->map,
-			isl_map_copy(proximity_edge->map));
-
-		// workaround empty maps
-		umap = isl_union_map_from_map(isl_map_copy(edge->map));
-		umap = isl_union_map_subtract(umap, isl_union_map_copy(graph->dep_rar));
-		if (isl_union_map_is_empty(umap) == isl_bool_true) {
-			isl_space *space = isl_map_get_space(edge->map);
-			isl_map_free(edge->map);
-			edge->map = isl_map_empty(space);
-		} else {
-			edge->map = isl_map_from_union_map(umap);
-		}
-
-		// FIXME: not sure this is correct: proximity edge may not be between the same references as spatial?  but proximity is reference-less, so it must involve all references, so seems fine
-		umap = isl_union_map_copy(edge->array_tagged_map);
-		umap = isl_union_map_factor_range(umap);
-		temporal_deps = isl_union_map_from_map(
-			isl_map_copy(proximity_edge->map));
-		temporal_deps = isl_union_map_union(temporal_deps,
-			isl_union_map_copy(graph->dep_rar));
-		umap = isl_union_map_product(temporal_deps, umap);
-		edge->array_tagged_map = isl_union_map_subtract(
-			edge->array_tagged_map, umap);
-	}
-	graph->separate_spatial = 1;
-}
-
 /* Construct an ILP problem for finding schedule coefficients
  * that result in non-negative, but small dependence distances
  * over all dependences.
@@ -4491,16 +4448,6 @@ static isl_stat setup_lp(isl_ctx *ctx, struct isl_sched_graph *graph,
 	if (graph_sort_id_list(graph) < 0)
 		return isl_stat_error;
 
-#if 0
-	if (graph->n_row == graph->maxvar - 2) {
-		fprintf(stderr, "[isl] last row schedule modifications\n");
-		spatial_locality = has_any_spatial_proximity(graph);
-		// remove proximity from spatial proximity
-		remove_temporal_from_spatial_proximity(graph);
-	}
-#endif
-	int last_dim = graph->separate_spatial && (graph->n_row != graph->maxvar - 1);
-
 	for (i = 0; i < graph->n; ++i) {
 		struct isl_sched_node *node = &graph->node[graph->sorted[i]];
 		if (node_update_cmap(node) < 0)
@@ -4538,7 +4485,7 @@ static isl_stat setup_lp(isl_ctx *ctx, struct isl_sched_graph *graph,
 	// 	if (add_sum_constraint(graph, 0, param_pos + 1, 2 * nparam) < 0)
 	// 		return isl_stat_error;
 
-	if (spatial_locality && last_dim) {
+	if (spatial_locality) {
 		add_groups_sum_constraint(graph, temporal, temporal + 2, 2*nparam, 1, 1);
 	}
 	if (parametric && add_param_sum_constraint(graph, param_pos - 2) < 0)
@@ -4556,9 +4503,9 @@ static isl_stat setup_lp(isl_ctx *ctx, struct isl_sched_graph *graph,
 	} else {
 		if (add_spatial_proximity_constraints(ctx, graph, use_coincidence) < 0)
 			return isl_stat_error;
-		if (last_dim)
-			add_all_proximity_constraints(graph, use_coincidence,
-				temporal + 1, temporal + 2);
+		if (add_all_proximity_constraints(graph, use_coincidence,
+				temporal + 1, temporal + 2) < 0)
+			return isl_stat_error;
 	}
 	if (add_all_validity_constraints(graph, use_coincidence) < 0)
 		return isl_stat_error;
@@ -6320,8 +6267,6 @@ static __isl_give isl_schedule_node *carry_dependences(
 		return isl_schedule_node_free(node);
 	if (trivial)
 		graph->n_row--;
-
-	remove_temporal_from_spatial_proximity(graph);
 
 	return split_scaled(node, graph);
 }
