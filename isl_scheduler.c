@@ -151,6 +151,7 @@ enum isl_edge_type {
 	isl_edge_condition,
 	isl_edge_conditional_validity,
 	isl_edge_spatial_proximity,
+	isl_edge_fusion_proximity,
 	isl_edge_proximity,
 	isl_edge_last = isl_edge_proximity,
 	isl_edge_local
@@ -391,6 +392,21 @@ error:
 	return NULL;
 }
 
+__isl_give isl_schedule_constraints *
+isl_schedule_constraints_set_fusion_proximity(
+	__isl_take isl_schedule_constraints *sc,
+	__isl_take isl_union_map *fusion_proximity)
+{
+	if (!sc || !fusion_proximity) {
+		isl_union_map_free(fusion_proximity);
+		return isl_schedule_constraints_free(sc);
+	}
+
+	isl_union_map_free(sc->constraint[isl_edge_fusion_proximity]);
+	sc->constraint[isl_edge_fusion_proximity] = fusion_proximity;
+	return sc;
+}
+
 __isl_null isl_schedule_constraints *isl_schedule_constraints_free(
 	__isl_take isl_schedule_constraints *sc)
 {
@@ -494,6 +510,18 @@ isl_schedule_constraints_get_counted_accesses(
 		return NULL;
 
 	return isl_union_map_copy(sc->counted_accesses);
+}
+
+/* Return the fusion proximity constraints of "sc".
+ */
+__isl_give isl_union_map *
+isl_schedule_constraints_get_fusion_proximity(
+	__isl_keep isl_schedule_constraints *sc)
+{
+	if (!sc)
+		return NULL;
+
+	return isl_union_map_copy(sc->constraint[isl_edge_fusion_proximity]);
 }
 
 /* Can a schedule constraint of type "type" be tagged?
@@ -628,6 +656,8 @@ void isl_schedule_constraints_dump(__isl_keep isl_schedule_constraints *sc)
 	isl_union_map_dump(sc->constraint[isl_edge_proximity]);
 	fprintf(stderr, "spatial proximity: ");
 	isl_union_map_dump(sc->constraint[isl_edge_spatial_proximity]);
+	fprintf(stderr, "fusion proximity: ");
+	isl_union_map_dump(sc->constraint[isl_edge_fusion_proximity]);
 	fprintf(stderr, "coincidence: ");
 	isl_union_map_dump(sc->constraint[isl_edge_coincidence]);
 	fprintf(stderr, "condition: ");
@@ -924,6 +954,13 @@ static int is_conditional_validity(struct isl_sched_edge *edge)
 static int is_spatial_proximity(struct isl_sched_edge *edge)
 {
 	return is_type(edge, isl_edge_spatial_proximity);
+}
+
+/* Is "edge" marked as fusion proximity edge?
+ */
+static int is_fusion_proximity(struct isl_sched_edge *edge)
+{
+	return is_type(edge, isl_edge_fusion_proximity);
 }
 
 struct id_rank_table_entry
@@ -4856,7 +4893,7 @@ static int update_edge(struct isl_sched_graph *graph,
 	isl_ctx *ctx = isl_map_get_ctx(edge->map);
 	isl_union_set *domain;
 	isl_union_map *umap;
-	int keep_proximity = ctx->opt->schedule_keep_proximity;
+	int keep_proximity = is_fusion_proximity(edge);
 
 	if (keep_proximity) {
 		domain = isl_sched_graph_domain(ctx, graph, &node_any, 0);
@@ -4896,9 +4933,7 @@ static int update_edge(struct isl_sched_graph *graph,
 	if (empty < 0)
 		goto error;
 
-	remove = outside_domain || (!keep_proximity && empty) ||
-		(keep_proximity && empty &&
-		 !is_proximity(edge) && !is_spatial_proximity(edge));
+	remove = outside_domain || (!keep_proximity && empty);
 	if (remove)
 		graph_remove_edge(graph, edge);
 
@@ -6906,8 +6941,9 @@ static int find_proximity(struct isl_sched_graph *graph,
 		struct isl_sched_edge *edge = &graph->edge[i];
 		int dist, weight;
 		isl_ctx *ctx = isl_map_get_ctx(edge->map);
-		int use_edge = is_proximity(edge) || (is_spatial_proximity(edge) &&
-			isl_options_get_schedule_spatial_fusion(ctx));
+		int use_edge = is_proximity(edge) ||
+			((is_spatial_proximity(edge) || is_fusion_proximity(edge)) &&
+			 isl_options_get_schedule_spatial_fusion(ctx));
 
 		if (!use_edge)
 			continue;
@@ -7757,8 +7793,9 @@ static isl_bool ok_to_merge_proximity(isl_ctx *ctx,
 	for (i = 0; i < graph->n_edge; ++i) {
 		struct isl_sched_edge *edge = &graph->edge[i];
 		isl_bool bounded;
-		int use_edge = is_proximity(edge) || (is_spatial_proximity(edge) &&
-			isl_options_get_schedule_spatial_fusion(ctx));
+		int use_edge = is_proximity(edge) ||
+			((is_spatial_proximity(edge) || is_fusion_proximity(edge)) &&
+			 isl_options_get_schedule_spatial_fusion(ctx));
 
 		if (!use_edge)
 			continue;
@@ -8359,8 +8396,9 @@ static isl_stat compute_weights(struct isl_sched_graph *graph,
 		isl_basic_map *hull;
 		int n_in, n_out;
 		isl_ctx *ctx = isl_map_get_ctx(edge->map);
-		int use_edge = is_proximity(edge) || (is_spatial_proximity(edge) &&
-			isl_options_get_schedule_spatial_fusion(ctx));
+		int use_edge = is_proximity(edge) ||
+			((is_spatial_proximity(edge) || is_fusion_proximity(edge)) &&
+			 isl_options_get_schedule_spatial_fusion(ctx));
 
 		if (!use_edge)
 			continue;
