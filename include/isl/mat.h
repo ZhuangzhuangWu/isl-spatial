@@ -95,6 +95,8 @@ __isl_give isl_mat *isl_mat_unimodular_complete(__isl_take isl_mat *M, int row);
 __isl_give isl_mat *isl_mat_row_basis(__isl_take isl_mat *mat);
 __isl_give isl_mat *isl_mat_row_basis_extension(
 	__isl_take isl_mat *mat1, __isl_take isl_mat *mat2);
+__isl_give isl_mat *isl_mat_linear_independent_complete(__isl_take isl_mat *mat,
+	int upto);
 int isl_mat_rank(__isl_keep isl_mat *M);
 
 __isl_give isl_mat *isl_mat_from_row_vec(__isl_take isl_vec *vec);
