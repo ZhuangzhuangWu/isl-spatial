@@ -777,6 +777,7 @@ struct isl_sched_graph {
 	isl_map_to_basic_set *pattern_to_group_set; // FIXME: this should be map_to_id, but we don't have it yet;  a general-purpose hash map is tricky to use
 	isl_id_list *group_list;
 	int n_groups;  // FIXME: this is equal to group_list->n
+	int found_one_coalescing;
 };
 
 static __isl_give isl_id_list *graph_refs_to_same_array(isl_ctx *ctx,
@@ -2237,6 +2238,8 @@ static isl_stat graph_init(struct isl_sched_graph *graph,
 	graph->n_groups = 0;
 	graph->group_list = isl_id_list_alloc(ctx, 1);
 	r = init_ref_to_group(graph);
+
+	graph->found_one_coalescing = 0;
 
 	return r;
 }
@@ -8006,6 +8009,37 @@ static isl_vec *find_coincident_spatial_constant_bound_solution(isl_ctx *ctx,
 	return sol;
 }
 
+static isl_bool has_nonempty_spatial_proximity(struct isl_sched_graph *graph)
+{
+	int i;
+
+	for (i = 0; i < graph->n_edge; ++i) {
+		struct isl_sched_edge *edge = &graph->edge[i];
+		if (!is_spatial_proximity(edge))
+			continue;
+		if (isl_map_is_empty(edge->map))
+			continue;
+		return isl_bool_true;
+	}
+
+	return isl_bool_false;
+}
+
+static isl_stat remove_all_spatial_proximity_edges(
+		struct isl_sched_graph *graph)
+{
+	int i;
+
+	for (i = 0; i < graph->n_edge; ++i) {
+		struct isl_sched_edge *edge = &graph->edge[i];
+		if (!is_spatial_proximity(edge))
+			continue;
+		graph_empty_and_remove_spatial_edge(graph, edge);
+	}
+
+	return isl_stat_ok;
+}
+
 /* Construct a band of schedule rows for a connected dependence graph.
  * The caller is responsible for determining the strongly connected
  * components and calling compute_maxvar first.
@@ -8051,7 +8085,7 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 	int check_conditional;
 	int continue_coincidence = 1;
 	int avoid_inner;
-	int has_spatial_proximity = has_any_spatial_proximity(graph);
+	int has_spatial_proximity;
 	int memory_coalescing;
 
 	if (sort_sccs(graph) < 0)
@@ -8084,8 +8118,10 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 		graph->dst_scc = -1;
 
 		use_coincidence = use_coincidence && continue_coincidence;
+		has_spatial_proximity = has_nonempty_spatial_proximity(graph);
 		carry_spatial_proximity = memory_coalescing &&
-				has_spatial_proximity && use_coincidence;
+				has_spatial_proximity && use_coincidence &&
+				!graph->found_one_coalescing;
 
 		if (carry_spatial_proximity) {
 			sol = find_coincident_spatial_solution(ctx, graph);
@@ -8098,8 +8134,13 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 				ctx, graph, sol);
 			if (!sol)
 				return isl_stat_error;
-			if (sol->size == 0)
+
+			if (sol->size == 0) {
 				memory_coalescing = 0;
+				carry_spatial_proximity = 0;
+			} else {
+				graph->found_one_coalescing = 1;
+			}
 			// what if it cannot find something in the first parallel dim?  do we keep looking in the next dim?  why wouldn't it be able to find something in the first and would in the second, they are permutable?  so stop looking in this band...
 		}
 
