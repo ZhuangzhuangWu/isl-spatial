@@ -224,6 +224,7 @@ struct isl_sched_node {
 	int	 cluster;
 
 	int	*coincident;
+	int	*spatial;
 
 	isl_multi_val *sizes;
 	isl_basic_set *bounds;
@@ -1146,6 +1147,8 @@ static void clear_node(struct isl_sched_graph *graph,
 	isl_mat_free(node->vmap);
 	if (graph->root == graph)
 		free(node->coincident);
+	if (graph->root)
+		free(graph->node[i].spatial);
 	isl_multi_val_free(node->sizes);
 	isl_basic_set_free(node->bounds);
 	isl_vec_free(node->max);
@@ -1453,6 +1456,7 @@ static isl_stat add_node(struct isl_sched_graph *graph,
 	isl_mat *sched;
 	isl_space *space;
 	int *coincident;
+	int *spatial;
 	struct isl_sched_node *node;
 
 	if (!set)
@@ -1472,7 +1476,9 @@ static isl_stat add_node(struct isl_sched_graph *graph,
 	node->sched = sched;
 	node->sched_map = NULL;
 	coincident = isl_calloc_array(ctx, int, graph->max_row);
+	spatial = isl_calloc_array(ctx, int, graph->max_row);
 	node->coincident = coincident;
+	node->spatial = spatial;
 	node->compressed = compressed;
 	node->hull = hull;
 	node->compress = compress;
@@ -1480,7 +1486,7 @@ static isl_stat add_node(struct isl_sched_graph *graph,
 	if (compute_sizes_and_max(ctx, node, set) < 0)
 		return isl_stat_error;
 
-	if (!space || !sched || (graph->max_row && !coincident))
+	if (!space || !sched || (graph->max_row && (!coincident || !spatial)))
 		return isl_stat_error;
 	if (compressed && (!hull || !compress || !decompress))
 		return isl_stat_error;
@@ -5032,9 +5038,11 @@ static __isl_give isl_vec *extract_var_coef(struct isl_sched_node *node,
  *
  * If coincident is set, then the caller guarantees that the new
  * row satisfies the coincidence constraints.
+ * If spatial is set, then the caller guarantees that the new row carries some
+ * spatial proximity constraints.
  */
 static int update_schedule(struct isl_sched_graph *graph,
-	__isl_take isl_vec *sol, int coincident)
+	__isl_take isl_vec *sol, int coincident, int spatial)
 {
 	int i, j;
 	isl_vec *csol = NULL;
@@ -5074,6 +5082,7 @@ static int update_schedule(struct isl_sched_graph *graph,
 			node->sched = isl_mat_set_element(node->sched,
 					row, 1 + node->nparam + j, csol->el[j]);
 		node->coincident[graph->n_total_row] = coincident;
+		node->spatial[graph->n_total_row] = spatial;
 	}
 	isl_vec_free(sol);
 	isl_vec_free(csol);
@@ -5596,6 +5605,7 @@ static isl_stat copy_nodes(struct isl_sched_graph *dst,
 		dst->node[j].sched = isl_mat_copy(src->node[i].sched);
 		dst->node[j].sched_map = isl_map_copy(src->node[i].sched_map);
 		dst->node[j].coincident = src->node[i].coincident;
+		dst->node[j].spatial = src->node[i].spatial;
 		dst->node[j].sizes = isl_multi_val_copy(src->node[i].sizes);
 		dst->node[j].bounds = isl_basic_set_copy(src->node[i].bounds);
 		dst->node[j].max = isl_vec_copy(src->node[i].max);
@@ -6032,9 +6042,12 @@ static __isl_give isl_schedule_node *insert_current_band(
 	}
 	node = isl_schedule_node_insert_partial_schedule(node, mupa);
 
-	for (i = 0; i < n; ++i)
+	for (i = 0; i < n; ++i) {
 		node = isl_schedule_node_band_member_set_coincident(node, i,
 					graph->node[0].coincident[start + i]);
+		node = isl_schedule_node_band_member_set_spatial(node, i,
+					graph->node[0].spatial[start + i]);
+	}
 	node = isl_schedule_node_band_set_permutable(node, permutable);
 
 	return node;
@@ -7637,7 +7650,7 @@ static __isl_give isl_schedule_node *carry(__isl_take isl_schedule_node *node,
 		return compute_component_schedule(node, graph, 1);
 	}
 
-	if (update_schedule(graph, sol, 0) < 0)
+	if (update_schedule(graph, sol, 0, 0) < 0)
 		return isl_schedule_node_free(node);
 	if (trivial)
 		graph->n_row--;
@@ -8467,6 +8480,7 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 		isl_vec *sol = NULL;
 		int violated;
 		int coincident;
+		int spatial = 0;
 		int carry_spatial_proximity;
 
 		graph->src_scc = -1;
@@ -8493,6 +8507,7 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 //				goto handle_empty_sol;
 			} else {
 				graph->found_one_coalescing = 1;
+				spatial = 1;
 			}
 		}
 
@@ -8522,7 +8537,7 @@ handle_empty_sol:
 		if (ctx->opt->schedule_single_outer_coincidence && coincident)
 			continue_coincidence = 0;
 
-		if (update_schedule(graph, sol, coincident) < 0)
+		if (update_schedule(graph, sol, coincident, spatial) < 0)
 			return isl_stat_error;
 
 		if (!check_conditional)
@@ -9815,8 +9830,10 @@ static isl_stat transform(isl_ctx *ctx, struct isl_sched_graph *graph,
 		node->sched_map = isl_map_free(node->sched_map);
 		if (!node->sched)
 			return isl_stat_error;
-		for (j = 0; j < n_new; ++j)
+		for (j = 0; j < n_new; ++j) {
 			node->coincident[start + j] = t_node->coincident[j];
+			node->spatial[start + j] = t_node->spatial[j];
+		}
 	}
 	graph->n_total_row -= n;
 	graph->n_row -= n;
