@@ -4628,7 +4628,8 @@ static isl_stat map_maximum_ref_rank(__isl_keep isl_map *map,
 	return isl_stat_ok;
 }
 
-static isl_map *node_extract_schedule(struct isl_sched_node *);
+static isl_map *node_extract_band_schedule(struct isl_sched_graph *,
+	struct isl_sched_node *);
 
 static isl_stat update_rank_table(__isl_take isl_map *access, void *user)
 {
@@ -4648,7 +4649,7 @@ static isl_stat update_rank_table(__isl_take isl_map *access, void *user)
 	node = graph_find_node(ctx, graph, node_space);
 	isl_space_free(node_space);
 
-	schedule = node_extract_schedule(node);
+	schedule = node_extract_band_schedule(graph, node);
 	r = map_maximum_ref_rank(access, schedule, graph);
 
 	isl_map_free(access);
@@ -10163,8 +10164,8 @@ static int scc_outer_parallel_dim(struct isl_sched_graph *graph, int start)
 		edge = &graph->edge[i];
 		if (!is_coincidence(edge))
 			continue;
-		src_schedule = node_extract_schedule(edge->src);
-		dst_schedule = node_extract_schedule(edge->dst);
+		src_schedule = node_extract_band_schedule(graph, edge->src);
+		dst_schedule = node_extract_band_schedule(graph, edge->dst);
 		dep = isl_map_copy(edge->map);
 		dep = isl_map_apply_domain(dep, src_schedule);
 		dep = isl_map_apply_range(dep, dst_schedule);
@@ -10225,8 +10226,8 @@ static isl_bool ok_to_merge_parallel(isl_ctx *ctx,
 
 		src_node = graph_find_node(ctx, src_scc, src_space);
 		dst_node = graph_find_node(ctx, dst_scc, dst_space);
-		src_schedule = node_extract_schedule(src_node);
-		dst_schedule = node_extract_schedule(dst_node);
+		src_schedule = node_extract_band_schedule(graph, src_node);
+		dst_schedule = node_extract_band_schedule(graph, dst_node);
 
 		dep = isl_map_copy(graph->edge[i].map);
 		dep = isl_map_apply_domain(dep, src_schedule);
