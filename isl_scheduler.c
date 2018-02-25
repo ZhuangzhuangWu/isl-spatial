@@ -5495,7 +5495,6 @@ static isl_stat update_edge(isl_ctx *ctx, struct isl_sched_graph *graph,
 {
 	int empty, outside_domain = 0, remove;
 	isl_map *id;
-	isl_ctx *ctx = isl_map_get_ctx(edge->map);
 	isl_union_set *domain;
 	isl_union_map *umap;
 	int keep_proximity = ctx->opt->schedule_keep_proximity;
