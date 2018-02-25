@@ -1147,8 +1147,8 @@ static void clear_node(struct isl_sched_graph *graph,
 	isl_mat_free(node->vmap);
 	if (graph->root == graph)
 		free(node->coincident);
-	if (graph->root)
-		free(graph->node[i].spatial);
+	if (graph->root == graph)
+		free(node->spatial);
 	isl_multi_val_free(node->sizes);
 	isl_basic_set_free(node->bounds);
 	isl_vec_free(node->max);
