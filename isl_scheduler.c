@@ -5597,6 +5597,24 @@ static __isl_give isl_schedule_node *compute_schedule_finish_band(
 	return sort_statements(node, graph, initialized);
 }
 
+/* Does the graph has at least one schedule dimension marked as coincident for
+ * all nodes?
+ */
+static isl_bool graph_has_coincident_dim(struct isl_sched_graph *graph) {
+	int i, j;
+
+	for (i = 0; i < graph->n_total_row; ++i) {
+		for (j = 0; j < graph->n; ++j) {
+			struct isl_sched_node *node = &graph->node[j];
+			if (!node->coincident[i])
+				break;
+		}
+		if (j == graph->n)
+			return isl_bool_true;
+	}
+	return isl_bool_false;
+}
+
 /* Construct a band of schedule rows for a connected dependence graph.
  * The caller is responsible for determining the strongly connected
  * components and calling compute_maxvar first.
@@ -5652,6 +5670,9 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 		isl_vec *sol;
 		int violated;
 		int coincident;
+
+		if (graph_has_coincident_dim(graph))
+			use_coincidence = 0;
 
 		graph->src_scc = -1;
 		graph->dst_scc = -1;
@@ -6405,7 +6426,7 @@ static isl_bool ok_to_merge_coincident(struct isl_clustering *c,
 
 	n_coincident = get_n_coincident(merge_graph);
 
-	return n_coincident >= max_coincident;
+	return n_coincident >= 1;
 }
 
 /* Return the transformation on "node" expressed by the current (and only)
