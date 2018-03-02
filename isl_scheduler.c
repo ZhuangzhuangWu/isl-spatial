@@ -5671,7 +5671,8 @@ static isl_stat compute_schedule_wcc_band(isl_ctx *ctx,
 		int violated;
 		int coincident;
 
-		if (graph_has_coincident_dim(graph))
+		if (graph_has_coincident_dim(graph) ||
+		    (graph->maxvar - graph->n_row <= 2 && graph->maxvar > 2))
 			use_coincidence = 0;
 
 		graph->src_scc = -1;
